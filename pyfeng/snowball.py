@@ -3,11 +3,11 @@ from abc import abstractmethod
 import pyfeng as pf
 
 class BaseModel:
-    def __init__(self):
-        self.intr = 0.019155   # 1y CDB bond rate. we don't use the
-        self.divr = 0
-        self.sigma = 0.04
-        self.texp = 2
+    def __init__(self, sigma, texp, intr, divr):
+        self.intr = intr
+        self.divr = divr
+        self.sigma = sigma
+        self.texp = texp
 
     @abstractmethod
     def stock_price(self, spot, dt, n_path, n_days):
@@ -30,12 +30,13 @@ class BaseModel:
         return impvol
 
 class BSMC(BaseModel):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, sigma, texp, intr, divr):
+        super().__init__(sigma, texp, intr, divr)
 
     def stock_price(self, spot, dt, n_path, n_days):
         st_path = np.zeros((n_path, n_days))
         st_path[:, 0] = spot
+        np.random.seed(12345)
         Z1 = np.random.normal(size=(n_path, n_days))
         for i in range(n_days-1):
             st_path[:, i+1] = st_path[:, i] * np.exp((self.intr - 0.5 * self.sigma**2) * dt + Z1[:, i] * np.sqrt(dt) * self.sigma)
@@ -46,20 +47,18 @@ class BSMC(BaseModel):
     #     st_increments = np.exp((self.intr - 0.5 * self.sigma ** 2) * dt - Z1 * np.sqrt(dt) * self.sigma)
     #     return st_increments
 
-    def implied_vol(self, strike, spot, dt, n_path, n_days, cp):
-        option_price = self.option_price(strike, spot, dt, n_path, n_days, cp)
-        bs_model = pf.Bsm(self.sigma, self.intr, self.divr)
-        impvol = bs_model.impvol(option_price, strike, spot, self.texp, cp)
-        return impvol
-
 class HestonMC(BaseModel):
-    vov = 0.2
+    vov = 0.56
     rho = -0.2
     kappa = 0.5
     theta = 0.1
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, sigma, vov, rho, kappa, theta, texp, intr, divr):
+        super().__init__(sigma, texp, intr, divr)
+        self.vov = vov
+        self.rho = rho
+        self.kappa = kappa
+        self.theta = theta
 
     def stock_price(self, spot, dt, n_path, n_days):
         """
@@ -70,7 +69,9 @@ class HestonMC(BaseModel):
         or, dWt = rho * dZt + (1-rho**2)**0.5 * dXt, where Zt and Xt are independent
         """
         # get RV with relation rho, the number of RV is n_path * n_days
+        np.random.seed(12345)
         X1 = np.random.normal(size=(n_path, n_days))
+        np.random.seed(98765)
         Z1 = np.random.normal(size=(n_path, n_days))
         W1 = np.zeros((n_path, n_days))
         for i in range(n_path):
@@ -95,7 +96,7 @@ class HestonMC(BaseModel):
         for i in range(n_days-1):
             var_t2, avgvar, *_ = model.cond_states_step(dt, var_t1)
             log_rt = model.draw_log_return(dt, var_t1, var_t2, avgvar)
-            st_path[:, i+1] = st_path[:,i] * np.exp(log_rt)
+            st_path[:, i+1] = st_path[:, i] * np.exp(log_rt)
             var_t1 = var_t2
         return st_path
 
@@ -105,35 +106,29 @@ class Snowball:
     coupon_rate is the annual coupon of the snowball product
     bound is a list, should have two parameters, the first is the knock-in bound, and the second is knock-out bond
     model is the model to generate the paths of underlying assets
+    n_path is the number of paths generated to calculate the price
+    n_days is the days to maturity of the product
+    notional is nominal price
     """
-    texp = 2
-    coupon_rate = 0.152
-    bound = [0.75, 1.0]
-    model = BSMC
-    n_path = 30000
-    dt = 1 / 365
-    n_days = texp * 365
-    notional = 10000
-    closure_dates = 90
-    knock_out_gap = 30
 
-    def __init__(self, model, texp, coupon_rate, bound, n_path=n_path, notional=notional, closure_dates=closure_dates, knock_out_gap=knock_out_gap, ko_ovserv_dates=None, ki_ovserv_dates=None):
+    def __init__(self, model, texp, coupon_rate, bound, n_path=30000, notional=10000, dt=1/365, closure_dates=90, knock_out_gap=30, ko_observ_dates=None, ki_observ_dates=None):
         self.texp = texp
+        self.dt = dt
+        self.n_days = texp * 365
         self.coupon_rate = coupon_rate
         self.knock_out_bound = bound[1]
         self.knock_in_bound = bound[0]
         self.model = model
         self.n_path = n_path
-        self.model.texp = self.texp
         self.notional = notional
         self.knock_out_gap = knock_out_gap
         self.closure_dates = closure_dates
-        if ko_ovserv_dates != None:
-            self.ko_observ_dates = ko_ovserv_dates   # knock out observation dates ... should be a list of integers <= texp * 365
+        if ko_observ_dates != None:
+            self.ko_observ_dates = ko_observ_dates   # knock out observation dates ... should be a list of integers <= texp * 365
         else:
             self.ko_observ_dates = np.linspace(self.closure_dates, self.n_days, 30, dtype='int')   # roughly approximate
-        if ki_ovserv_dates != None:
-            self.ki_observ_dates = ki_ovserv_dates   # knock in observation dates ... should be a list of integers <= texp * 365
+        if ki_observ_dates != None:
+            self.ki_observ_dates = ki_observ_dates   # knock in observation dates ... should be a list of integers <= texp * 365
         else:
             self.ki_observ_dates = np.linspace(self.closure_dates, self.n_days, 1, dtype='int')    # roughly approximate
 
@@ -141,13 +136,12 @@ class Snowball:
         """
         set the parameter for Heston model / BSM model
         """
-        self.model.intr = intr
-        self.model.sigma = sigma
         if self.model == HestonMC:
-            self.model.vov = vov
-            self.model.rho = rho
-            self.model.kappa = mr
-            self.model.theta = theta
+            self.model_init = self.model(sigma, vov, rho, mr, theta, self.texp, intr, divr=0)
+        elif self.model == BSMC:
+            self.model_init = self.model(sigma, self.texp, intr, divr=0)
+        else:
+            raise ValueError("self.model should be BSMC or Heston! something's wrong...")
 
     def price(self, spot, Andersen=False):
         """
@@ -157,11 +151,11 @@ class Snowball:
         knock_out_price = spot * self.knock_out_bound
         knock_in_price = spot * self.knock_in_bound
         if self.model == BSMC:
-            st_path = self.model().stock_price(spot, self.dt, self.n_path, self.n_days)
+            st_path = self.model_init.stock_price(spot, self.dt, self.n_path, self.n_days)
         elif (self.model == HestonMC) & (Andersen==False):
-            st_path = self.model().stock_price(spot, self.dt, self.n_path, self.n_days)
+            st_path = self.model_init.stock_price(spot, self.dt, self.n_path, self.n_days)
         elif (self.model == HestonMC) & (Andersen==True):
-            st_path = self.model().stock_price_Andersen(spot, self.dt, self.n_path, self.n_days)
+            st_path = self.model_init.stock_price_Andersen(spot, self.dt, self.n_path, self.n_days)
         else:
             raise ValueError('Only support BSMC & HestonMC currently...')
 
@@ -178,7 +172,7 @@ class Snowball:
                     ko += 1
                     payout[i] = self.coupon_rate / 365 * j
                     payout_t[i] = j
-                    last_ki_t[i] = j
+                    last_ko_t[i] = j
                     break
                 # knock in
                 elif (st_path[i,j] < knock_in_price):
@@ -195,14 +189,15 @@ class Snowball:
             if (ki == 0) & (ko == 0):
                 payout[i] = self.coupon_rate * self.n_days / 365
                 payout_t[i] = self.n_days
-        price = np.mean(self.notional * (payout + 1) * np.exp(-payout_t / 365 * self.model().intr))
+        price = np.mean(self.notional * (payout + 1) * np.exp(-payout_t / 365 * self.model_init.intr))
         return price
 
 if __name__ == '__main__':
-    texp = 3
-    coupon_rate = 0.3
+    texp = 2
+    coupon_rate = 0.152
     bound = [0.75, 1]
     notional = 10000
-    snowball = Snowball(HestonMC, texp, coupon_rate, bound, n_path=10000)
-    price = snowball.price(5955.52, Andersen=False)
+    snowball = Snowball(BSMC, texp, coupon_rate, bound, n_path=30000, notional=notional)
+    snowball.set_model_param(sigma=0.2, intr=0.019155)
+    price = snowball.price(5955.52)
     print(price)
